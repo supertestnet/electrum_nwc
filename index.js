@@ -394,7 +394,7 @@ async function lookupInvoice( pmthash ) {
 }
 
 var lnSend = async ( invoice, amt_for_amountless_invoice, app_pubkey ) => {
-    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "lnpay", { invoice, password: electrum_alt_password } );
+    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "lnpay", { invoice, password: electrum_alt_password });
     if ( data.result.hasOwnProperty( "success" ) && data.result.success ) {
         var preimage = data.result.preimage;
         var fee = data.result.fee_msat ? data.result.fee_msat : 0;

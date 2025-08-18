@@ -378,12 +378,26 @@ var getBlockhash = async blocknum => {
     return data.text();
 }
 
+var satsToBitcoin = sats => {
+    var btc = String( sats ).padStart( 8, "0" ).slice( 0,-8 ) + "." + String( sats ).padStart( 8, "0" ).slice( -8 );
+    if ( btc.endsWith( "00000" ) ) {
+        btc = btc.substring( 0, btc.length - 5 );
+        var i; for ( i=0; i<5; i++ ) {
+            if ( btc.endsWith( "0" ) ) btc = btc.substring( 0, btc.length - 1 );
+        }
+        if ( btc.endsWith( "." ) ) btc = btc.substring( 0, btc.length - 1 );
+        if ( !btc ) btc = 0;
+    }
+    return btc;
+}
+
 async function getLspPubkey() {
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "nodeid" );
     return data.result;
 }
 
 async function getLNInvoice( amount, desc ) {
+    amount = Number( satsToBitcoin( amount ) );
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "add_request", { amount, lightning: true, force: true, memo: desc });
     return data.result;
 }

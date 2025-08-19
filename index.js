@@ -77,7 +77,7 @@ var getInvoiceAmount = invoice => {
 }
 
 var checkInvoiceTilPaidOrError = async ( invoice, app_pubkey ) => {
-    var is_paid = await checkLNInvoice( {payment_request: invoice}, app_pubkey );
+    var is_paid = await checkLNInvoice( {lightning_invoice: invoice}, app_pubkey );
     if ( is_paid ) return;
     var pmthash = getInvoicePmthash( invoice );
     var expiry = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "expires_at" ];
@@ -101,14 +101,22 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey ) => {
         var pmthash = getInvoicePmthash( invoice_obj );
         return !!global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].settled_at;
     }
-    var pmthash = getInvoicePmthash( invoice_obj[ "payment_request" ] );
+    var pmthash = getInvoicePmthash( invoice_obj[ "lightning_invoice" ] );
     var settled_status = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ];
     var invoice_data = await lookupInvoice( pmthash );
-    var is_paid = invoice_data.status === 3;
-    if ( is_paid ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
+    var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
+    if ( is_paid ) {
+        global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
+        var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
+        var method = 'settle_hold_invoice';
+        var params = {preimage};
+        queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+    }
     var status_changed = is_paid && !settled_status;
-    if ( status_changed ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
-    if ( status_changed ) global_state.nostr_state.nwc_info[ app_pubkey ].balance = global_state.nostr_state.nwc_info[ app_pubkey ].balance + global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "amount" ];
+    if ( status_changed ) {
+        global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
+        global_state.nostr_state.nwc_info[ app_pubkey ].balance = global_state.nostr_state.nwc_info[ app_pubkey ].balance + global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "amount" ];
+    }
     return is_paid;
 }
 
@@ -396,14 +404,20 @@ async function getLspPubkey() {
     return data.result;
 }
 
-async function getLNInvoice( amount, desc ) {
+async function getLNInvoice( amount, memo ) {
     amount = Number( satsToBitcoin( amount ) );
-    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "add_request", { amount, lightning: true, force: true, memo: desc });
-    return data.result;
+    var preimage = super_nostr.getPrivkey();
+    var payment_hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+    var method = 'add_hold_invoice';
+    var params = {payment_hash, amount, memo};
+    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+    return [ data.result, preimage ];
 }
 
-async function lookupInvoice( pmthash ) {
-    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "get_request", { request_id: pmthash });
+async function lookupInvoice( payment_hash ) {
+    var method = "check_hold_invoice";
+    var params = {payment_hash}
+    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
     return data.result;
 }
 
@@ -572,8 +586,10 @@ var handleFunction = async message => {
             }
             var desc = "";
             if ( command.params.description ) desc = command.params.description;
-            var invoice_data = await getLNInvoice( Math.floor( command.params.amount / 1000 ), desc );
-            var invoice = invoice_data.lightning_invoice;
+            var [ invoice_data, preimage ] = await getLNInvoice( Math.floor( command.params.amount / 1000 ), desc );
+            var invoice = invoice_data.invoice;
+            invoice_data.lightning_invoice = invoice;
+            delete invoice_data.invoice;
             var customNetwork = { bech32: "tbs", pubKeyHash: 63, scriptHash: 123, validWitnessVersions: [ 0, 1 ] }
             if ( !invoice.startsWith( "lntbs" ) ) customNetwork = undefined;
             var reply = JSON.stringify({
@@ -584,7 +600,7 @@ var handleFunction = async message => {
                     bolt11: invoice,
                     description: getInvoiceDescription( invoice ) || "",
                     description_hash: getInvoiceDeschash( invoice ) || "",
-                    preimage: "",
+                    preimage,
                     payment_hash: getInvoicePmthash( invoice ),
                     amount: getInvoiceAmount( invoice ),
                     fees_paid: 0,
@@ -602,7 +618,7 @@ var handleFunction = async message => {
                 type: "incoming",
                 description: getInvoiceDescription( invoice ) || "",
                 description_hash: getInvoiceDeschash( invoice ) || "",
-                preimage: "",
+                preimage,
                 payment_hash: getInvoicePmthash( invoice ),
                 fees_paid: 0,
                 created_at: bolt11.decode( invoice, customNetwork ).timestamp,
@@ -638,7 +654,7 @@ var handleFunction = async message => {
             }
             if ( !invoice ) invoice = state.tx_history[ pmthash ].invoice;
             var invoice_data = state.tx_history[ pmthash ][ "invoice_data" ];
-            if ( !invoice_data ) invoice_data = invoice;
+            if ( !invoice_data ) invoice_data = {lightning_invoice: invoice};
             var invoice_is_settled = await checkLNInvoice( invoice_data, app_pubkey );
             var preimage_to_return = state.tx_history[ pmthash ][ "preimage" ];
             if ( state.tx_history[ pmthash ][ "settled_at" ] && !preimage_to_return ) preimage_to_return = "0".repeat( 64 );

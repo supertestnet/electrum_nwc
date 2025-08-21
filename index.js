@@ -877,5 +877,6 @@ var handleFunction = async message => {
     }
     var connection = await super_nostr.newPermanentConnection( global_state.relays[ 0 ], listenFunction, handleFunction );
     global_state.nostr_state.sockets[ global_state.pubkey ] = super_nostr.sockets[ connection ];
-    console.log( nwc_string );
+    var properly_connected = await getLspPubkey();
+    if ( typeof properly_connected === "string" && ( properly_connected.startsWith( "02" ) || properly_connected.startsWith( "03" ) ) ) console.log( nwc_string );
 })();

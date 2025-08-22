@@ -3,6 +3,7 @@ var electrum_password = '';
 var electrum_alt_password = '';
 var electrum_endpoint = 'http://127.0.0.1:7777';
 var nostr_relays = [ "wss://nostrue.com" ];
+// var nostr_relays = [ "ws://127.0.0.1:6969" ];
 
 // DO NOT MODIFY STUFF BELOW THIS LINE
 
@@ -366,9 +367,10 @@ var super_nostr = {
 }
 
 var global_state = {
-    relays: [ "wss://nostrue.com" ],
+    relays: nostr_relays,
     privkey: super_nostr.getPrivkey(),
-    pubkey: null,    
+    pubkey: null,
+    open_hashes: {},
     nostr_state: {
         sockets: {},
         nwc_info: {},
@@ -408,6 +410,7 @@ async function getLNInvoice( amount, memo ) {
     amount = Number( satsToBitcoin( amount ) );
     var preimage = super_nostr.getPrivkey();
     var payment_hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+    global_state.open_hashes[ payment_hash ] = {preimage, status: 'unpaid', received_amount_sat: 0, invoice_amount_sat: amount};
     var method = 'add_hold_invoice';
     var params = {payment_hash, amount, memo};
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
@@ -415,6 +418,8 @@ async function getLNInvoice( amount, memo ) {
 }
 
 async function lookupInvoice( payment_hash ) {
+    var status = global_state.open_hashes[ payment_hash ][ "status" ];
+    if ( status === "paid" ) return {result: global_state.open_hashes[ payment_hash ]}
     var method = "check_hold_invoice";
     var params = {payment_hash}
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
@@ -422,7 +427,14 @@ async function lookupInvoice( payment_hash ) {
 }
 
 var lnSend = async ( invoice, amt_for_amountless_invoice, app_pubkey ) => {
-    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "lnpay", { invoice, password: electrum_alt_password });
+    var payment_hash = getInvoicePmthash( invoice );
+    if ( global_state.open_hashes.hasOwnProperty( payment_hash ) ) {
+        var data = {result: {success: true, preimage: global_state.open_hashes[ payment_hash ].preimage, fee_msat: 0}}
+        global_state.open_hashes[ payment_hash ][ "status" ] = "paid";
+        global_state.open_hashes[ payment_hash ][ "received_amount_sat" ] = global_state.open_hashes[ payment_hash ][ "invoice_amount_sat" ];
+    } else {
+        var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, "lnpay", { invoice, password: electrum_alt_password });
+    }
     if ( data.result.hasOwnProperty( "success" ) && data.result.success ) {
         var preimage = data.result.preimage;
         var fee = data.result.fee_msat ? data.result.fee_msat : 0;
@@ -810,19 +822,19 @@ var handleFunction = async message => {
                 return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
             }
 
-            var response_from_mint = await lnSend( invoice, null, app_pubkey );
+            var my_response = await lnSend( invoice, null, app_pubkey );
             //response is one of two things:
             //1. an error message
             //2. "payment succeeded"
 
-            if ( !response_from_mint.startsWith( "payment succeeded" ) ) {
-                var err_msg = response_from_mint;
+            if ( !my_response.startsWith( "payment succeeded" ) ) {
+                var err_msg = my_response;
                 global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "err_msg" ] = err_msg;
                 var reply = JSON.stringify({
                     result_type: command.method,
                     error: {
                         code: "OTHER",
-                        message: response_from_mint,
+                        message: my_response,
                     },
                     result: {}
                 });

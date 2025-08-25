@@ -77,18 +77,18 @@ var getInvoiceAmount = invoice => {
     return Number( amount );
 }
 
-var checkInvoiceTilPaidOrError = async ( invoice, app_pubkey ) => {
-    var is_paid = await checkLNInvoice( {lightning_invoice: invoice}, app_pubkey );
+var checkInvoiceTilPaidOrError = async ( invoice, app_pubkey, is_incoming ) => {
+    var is_paid = await checkLNInvoice( {lightning_invoice: invoice}, app_pubkey, is_incoming );
     if ( is_paid ) return;
     var pmthash = getInvoicePmthash( invoice );
     var expiry = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "expires_at" ];
     var now = Math.floor( Date.now() / 1000 );
     if ( now >= expiry ) return;
     await super_nostr.waitSomeSeconds( 20 );
-    checkInvoiceTilPaidOrError( invoice, app_pubkey );
+    checkInvoiceTilPaidOrError( invoice, app_pubkey, is_incoming );
 }
 
-var checkLNInvoice = async ( invoice_obj, app_pubkey ) => {
+var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
     if ( typeof invoice_obj !== "object" ) {
         //I normally pass in an invoice_data object which I got
         //from the mint. But when this is an invoice *I* am
@@ -105,6 +105,18 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey ) => {
     var pmthash = getInvoicePmthash( invoice_obj[ "lightning_invoice" ] );
     var settled_status = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ];
     var invoice_data = await lookupInvoice( pmthash );
+    if ( is_incoming ) {
+        var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
+        if ( is_paid ) {
+            global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
+            var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
+            var method = 'settle_hold_invoice';
+            var params = {preimage};
+            queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+        }
+    } else {
+        var is_paid = invoice_data.status === 'paid' || invoice_data.status === 3;
+    }
     var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
     if ( is_paid ) {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
@@ -418,8 +430,10 @@ async function getLNInvoice( amount, memo ) {
 }
 
 async function lookupInvoice( payment_hash ) {
-    var status = global_state.open_hashes[ payment_hash ][ "status" ];
-    if ( status === "paid" ) return {result: global_state.open_hashes[ payment_hash ]}
+    if ( global_state.open_hashes.hasOwnProperty( payment_hash ) ) {
+        var status = global_state.open_hashes[ payment_hash ][ "status" ];
+        if ( status === "paid" ) return {result: global_state.open_hashes[ payment_hash ]}
+    }
     var method = "check_hold_invoice";
     var params = {payment_hash}
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
@@ -638,7 +652,8 @@ var handleFunction = async message => {
                 settled_at: null,
                 paid: false,
             }
-            checkInvoiceTilPaidOrError( invoice, app_pubkey );
+            var is_incoming = true;
+            checkInvoiceTilPaidOrError( invoice, app_pubkey, is_incoming );
             var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
             var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
             return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
@@ -667,7 +682,8 @@ var handleFunction = async message => {
             if ( !invoice ) invoice = state.tx_history[ pmthash ].invoice;
             var invoice_data = state.tx_history[ pmthash ][ "invoice_data" ];
             if ( !invoice_data ) invoice_data = {lightning_invoice: invoice};
-            var invoice_is_settled = await checkLNInvoice( invoice_data, app_pubkey );
+            var is_incoming = state.tx_history[ pmthash ].type === "incoming";
+            var invoice_is_settled = await checkLNInvoice( invoice_data, app_pubkey, is_incoming );
             var preimage_to_return = state.tx_history[ pmthash ][ "preimage" ];
             if ( state.tx_history[ pmthash ][ "settled_at" ] && !preimage_to_return ) preimage_to_return = "0".repeat( 64 );
             var reply = {

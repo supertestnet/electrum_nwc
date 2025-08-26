@@ -2,8 +2,8 @@ var electrum_username = 'user';
 var electrum_password = '';
 var electrum_alt_password = '';
 var electrum_endpoint = 'http://127.0.0.1:7777';
-var nostr_relays = [ "wss://nostrue.com" ];
-// var nostr_relays = [ "ws://127.0.0.1:6969" ];
+// var nostr_relays = [ "wss://nostrue.com" ];
+var nostr_relays = [ "ws://127.0.0.1:6969" ];
 
 // DO NOT MODIFY STUFF BELOW THIS LINE
 

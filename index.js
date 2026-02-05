@@ -125,7 +125,12 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
     }
     var pmthash = getInvoicePmthash( invoice_obj[ "lightning_invoice" ] );
     var settled_status = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ];
-    var invoice_data = await lookupInvoice( pmthash );
+    if ( is_incoming ) {
+        var invoice_data = await lookupInvoice( pmthash );
+    } else {
+        var invoice_data = await lookupOutgoingInvoice( pmthash );
+        console.log( invoice_data );
+    }
     if ( is_incoming ) {
         var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
         if ( is_paid ) {
@@ -138,11 +143,8 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
             }
         }
     } else {
-        var is_paid = invoice_data.status === 'paid' || invoice_data.status === 3;
+        var is_paid = invoice_data.status_str === 'Paid' || invoice_data.status === 3;
     }
-    var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
-    var is_settled = invoice_data.status === 'settled';
-    var is_canceled = invoice_data.status === 'unknown';
     if ( is_paid ) {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
         var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
@@ -157,17 +159,21 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
         global_state.nostr_state.nwc_info[ app_pubkey ].balance = global_state.nostr_state.nwc_info[ app_pubkey ].balance + global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "amount" ];
     }
-    var old_state = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ];
-    if ( is_paid && !global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ] ) var new_state = "ACCEPTED";
-    if ( !is_paid && is_canceled ) var new_state = "CANCELED";
-    if ( !is_paid && !is_canceled ) var new_state = "NO_PAYMENT_DETECTED";
-    if ( is_settled ) var new_state = "SETTLED";
-    var hodl_status_changed = old_state !== new_state;
-    if ( hodl_status_changed ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = new_state;
-    if ( hodl_status_changed && new_state === "SETTLED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "SETTLED";
-    if ( hodl_status_changed && new_state === "ACCEPTED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "PAYMENT_DETECTED___YOU_MAY_NOW_SETTLE_OR_CANCEL";
-    if ( hodl_status_changed && new_state === "CANCELED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "CANCELED";
-    if ( hodl_status_changed && new_state === "NO_PAYMENT_DETECTED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "NO_PAYMENT_DETECTED";
+    if ( is_incoming ) {
+        var is_settled = invoice_data.status === 'settled';
+        var is_canceled = invoice_data.status === 'unknown';
+        var old_state = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ];
+        if ( is_paid && !global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ] ) var new_state = "ACCEPTED";
+        if ( !is_paid && is_canceled ) var new_state = "CANCELED";
+        if ( !is_paid && !is_canceled ) var new_state = "NO_PAYMENT_DETECTED";
+        if ( is_settled ) var new_state = "SETTLED";
+        var hodl_status_changed = old_state !== new_state;
+        if ( hodl_status_changed ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = new_state;
+        if ( hodl_status_changed && new_state === "SETTLED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "SETTLED";
+        if ( hodl_status_changed && new_state === "ACCEPTED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "PAYMENT_DETECTED___YOU_MAY_NOW_SETTLE_OR_CANCEL";
+        if ( hodl_status_changed && new_state === "CANCELED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "CANCELED";
+        if ( hodl_status_changed && new_state === "NO_PAYMENT_DETECTED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "NO_PAYMENT_DETECTED";
+    }
     return is_paid;
 }
 
@@ -479,6 +485,13 @@ async function lookupInvoice( payment_hash ) {
     }
     var method = "check_hold_invoice";
     var params = {payment_hash}
+    var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+    return data.result;
+}
+
+async function lookupOutgoingInvoice( payment_hash ) {
+    var method = "get_invoice";
+    var params = {invoice_id: payment_hash}
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
     return data.result;
 }

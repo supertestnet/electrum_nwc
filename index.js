@@ -89,6 +89,26 @@ var checkInvoiceTilPaidOrError = async ( invoice, app_pubkey, is_incoming ) => {
     checkInvoiceTilPaidOrError( invoice, app_pubkey, is_incoming );
 }
 
+var settleHodlInvoice = async ( preimage, app_pubkey ) => {
+    var pmthash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+    if ( global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ] && global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].type === "incoming" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].preimage = preimage;
+    else return false;
+    var method = 'settle_hold_invoice';
+    var params = {preimage};
+    queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+    global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].hodl_status = "SETTLED";
+    return true;
+}
+
+var cancelHodlInvoice = async ( pmthash, app_pubkey ) => {
+    if ( !global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ] || !global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].type === "incoming" || global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].hodl_status === "SETTLED" ) return false;
+    var method = 'cancel_hold_invoice';
+    var params = {payment_hash: pmthash};
+    queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+    global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].hodl_status = "CANCELED";
+    return true;
+}
+
 var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
     if ( typeof invoice_obj !== "object" ) {
         //I normally pass in an invoice_data object which I got
@@ -111,26 +131,43 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
         if ( is_paid ) {
             global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
             var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
-            var method = 'settle_hold_invoice';
-            var params = {preimage};
-            queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+            if ( preimage ) {
+                var method = 'settle_hold_invoice';
+                var params = {preimage};
+                queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+            }
         }
     } else {
         var is_paid = invoice_data.status === 'paid' || invoice_data.status === 3;
     }
     var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
+    var is_settled = invoice_data.status === 'settled';
+    var is_canceled = invoice_data.status === 'unknown';
     if ( is_paid ) {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
         var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
-        var method = 'settle_hold_invoice';
-        var params = {preimage};
-        queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+        if ( preimage ) {
+            var method = 'settle_hold_invoice';
+            var params = {preimage};
+            queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
+        }
     }
-    var status_changed = is_paid && !settled_status;
+    var status_changed = is_paid && !settled_status && global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
     if ( status_changed ) {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
         global_state.nostr_state.nwc_info[ app_pubkey ].balance = global_state.nostr_state.nwc_info[ app_pubkey ].balance + global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "amount" ];
     }
+    var old_state = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ];
+    if ( is_paid && !global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ] ) var new_state = "ACCEPTED";
+    if ( !is_paid && is_canceled ) var new_state = "CANCELED";
+    if ( !is_paid && !is_canceled ) var new_state = "NO_PAYMENT_DETECTED";
+    if ( is_settled ) var new_state = "SETTLED";
+    var hodl_status_changed = old_state !== new_state;
+    if ( hodl_status_changed ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = new_state;
+    if ( hodl_status_changed && new_state === "SETTLED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "SETTLED";
+    if ( hodl_status_changed && new_state === "ACCEPTED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "PAYMENT_DETECTED___YOU_MAY_NOW_SETTLE_OR_CANCEL";
+    if ( hodl_status_changed && new_state === "CANCELED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "CANCELED";
+    if ( hodl_status_changed && new_state === "NO_PAYMENT_DETECTED" ) global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "hodl_status" ] = "NO_PAYMENT_DETECTED";
     return is_paid;
 }
 
@@ -419,13 +456,18 @@ async function getLspPubkey() {
     return data.result;
 }
 
-async function getLNInvoice( amount, memo ) {
+async function getLNInvoice( amount, memo, pmthash, min_final_cltv_expiry_delta = 294 ) {
     amount = Number( satsToBitcoin( amount ) );
-    var preimage = super_nostr.getPrivkey();
-    var payment_hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+    if ( !pmthash ) {
+        var preimage = super_nostr.getPrivkey();
+        var payment_hash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+    } else {
+        var preimage = null;
+        var payment_hash = pmthash;
+    }
     global_state.open_hashes[ payment_hash ] = {preimage, status: 'unpaid', received_amount_sat: 0, invoice_amount_sat: amount};
     var method = 'add_hold_invoice';
-    var params = {payment_hash, amount, memo};
+    var params = {payment_hash, amount, memo, min_final_cltv_expiry_delta};
     var data = await queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
     return [ data.result, preimage ];
 }
@@ -702,6 +744,7 @@ var handleFunction = async message => {
                     created_at: state.tx_history[ pmthash ][ "created_at" ],
                     expires_at: state.tx_history[ pmthash ][ "expires_at" ],
                     settled_at: state.tx_history[ pmthash ][ "settled_at" ],
+                    hodl_status: state.tx_history[ pmthash ][ "hodl_status" ],
                 }
             }
             if ( "err_msg" in state.tx_history[ pmthash ] && state.tx_history[ pmthash ][ "err_msg" ] ) {
@@ -871,6 +914,183 @@ var handleFunction = async message => {
             var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
             return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
         }
+        if ( command.method === "make_hodl_invoice" ) {
+            if ( !String( command.params.amount ).endsWith( "000" ) ) {
+                var reply = JSON.stringify({
+                    result_type: command.method,
+                    error: {
+                        code: "OTHER",
+                        message: "amount must end in 000 (remember, we require millisats! But they must always be zero!)",
+                    },
+                    result: {}
+                });
+                var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+                var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+                return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+            }
+            if ( !command.params.payment_hash ) {
+                var reply = JSON.stringify({
+                    result_type: command.method,
+                    error: {
+                        code: "OTHER",
+                        message: "hodl invoices require specifying a payment hash!",
+                    },
+                    result: {}
+                });
+                var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+                var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+                return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+            }
+            if ( command.params.expiry && isNaN( command.params.expiry ) ) {
+                var reply = JSON.stringify({
+                    result_type: command.method,
+                    error: {
+                        code: "OTHER",
+                        message: "expiry must be a number!",
+                    },
+                    result: {}
+                });
+                var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+                var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+                return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+            }
+            if ( command.params.expiry && command.params.expiry < 294 ) {
+                var reply = JSON.stringify({
+                    result_type: command.method,
+                    error: {
+                        code: "OTHER",
+                        message: "this ln implementation requires an expiry minimum of 294",
+                    },
+                    result: {}
+                });
+                var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+                var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+                return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+            }
+            var payment_hash = "";
+            var expiry = 294;
+            if ( command.params.expiry ) expiry = command.params.expiry;
+            var desc = "";
+            var desc_hash = "";
+            payment_hash = command.params.payment_hash;
+            if ( command.params.expiry ) expiry = Number( command.params.expiry );
+            if ( command.params.description ) desc = command.params.description;
+            if ( command.params.desc_hash ) desc_hash = command.params.desc_hash;
+            var [ invoice_data ] = await getLNInvoice( Math.floor( command.params.amount / 1000 ), desc, payment_hash, expiry );
+            var invoice = invoice_data.invoice;
+            invoice_data.lightning_invoice = invoice;
+            delete invoice_data.invoice;
+            var customNetwork = { bech32: "tbs", pubKeyHash: 63, scriptHash: 123, validWitnessVersions: [ 0, 1 ] }
+            if ( !invoice.startsWith( "lntbs" ) ) customNetwork = undefined;
+            var reply = JSON.stringify({
+                result_type: command.method,
+                result: {
+                    type: "incoming",
+                    invoice,
+                    bolt11: invoice,
+                    description: getInvoiceDescription( invoice ) || "",
+                    description_hash: getInvoiceDeschash( invoice ) || "",
+                    preimage: "",
+                    payment_hash: getInvoicePmthash( invoice ),
+                    amount: getInvoiceAmount( invoice ),
+                    fees_paid: 0,
+                    created_at: bolt11.decode( invoice, customNetwork ).timestamp,
+                    expires_at: bolt11.decode( invoice, customNetwork ).timeExpireDate,
+                    settled_at: null,
+                    hodl_status: "NO_PAYMENT_DETECTED",
+                },
+            });
+            state.tx_history[ getInvoicePmthash( invoice ) ] = {
+                invoice_data,
+                pmthash: getInvoicePmthash( invoice ),
+                amount: getInvoiceAmount( invoice ) * 1000,
+                invoice,
+                bolt11: invoice,
+                type: "incoming",
+                description: getInvoiceDescription( invoice ) || "",
+                description_hash: getInvoiceDeschash( invoice ) || "",
+                preimage: "",
+                payment_hash: getInvoicePmthash( invoice ),
+                fees_paid: 0,
+                created_at: bolt11.decode( invoice, customNetwork ).timestamp,
+                expires_at: bolt11.decode( invoice, customNetwork ).timeExpireDate,
+                settled_at: null,
+                paid: false,
+                hodl_status: "NO_PAYMENT_DETECTED",
+            }
+            checkInvoiceTilPaidOrError( invoice, app_pubkey );
+            var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+            var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+            return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+        }
+        if ( command.method === "settle_hodl_invoice" ) {
+            if ( !command.params.preimage ) {
+                var reply = JSON.stringify({
+                    result_type: command.method,
+                    error: {
+                        code: "OTHER",
+                        message: "you forgot to include the preimage to the hodl invoice you want to settle!",
+                    },
+                    result: {}
+                });
+                var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+                var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+                return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+            }
+            var settled = await settleHodlInvoice( command.params.preimage, app_pubkey );
+            var preimage = command.params.preimage;
+            var pmthash = await super_nostr.sha256( super_nostr.hexToBytes( preimage ) );
+            var state = global_state.nostr_state.nwc_info[ app_pubkey ];
+            state.tx_history[ pmthash ][ "preimage" ] = preimage;
+            state.tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
+            state.tx_history[ pmthash ][ "paid" ] = true;
+            var reply = JSON.stringify({
+                result_type: command.method,
+                result: {
+                    type: state.tx_history[ pmthash ][ "type" ],
+                    invoice: state.tx_history[ pmthash ][ "invoice" ],
+                    bolt11: state.tx_history[ pmthash ][ "bolt11" ],
+                    description: state.tx_history[ pmthash ][ "description" ],
+                    description_hash: state.tx_history[ pmthash ][ "description_hash" ],
+                    preimage: preimage,
+                    payment_hash: pmthash,
+                    amount: state.tx_history[ pmthash ][ "amount" ],
+                    fees_paid: state.tx_history[ pmthash ][ "fees_paid" ],
+                    created_at: state.tx_history[ pmthash ][ "created_at" ],
+                    expires_at: state.tx_history[ pmthash ][ "expires_at" ],
+                    settled_at: state.tx_history[ pmthash ][ "settled_at" ],
+                    hodl_status: state.tx_history[ pmthash ][ "hodl_status" ],
+                }
+            });
+            var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+            var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+            return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+        }
+        if ( command.method === "cancel_hodl_invoice" ) {
+            if ( !command.params.payment_hash ) {
+                var reply = JSON.stringify({
+                    result_type: command.method,
+                    error: {
+                        code: "OTHER",
+                        message: "you forgot to include the payment hash of the hodl invoice you want to cancel!",
+                    },
+                    result: {}
+                });
+                var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+                var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+                return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+            }
+            await cancelHodlInvoice( command.params.payment_hash, app_pubkey );
+            var pmthash = command.params.payment_hash;
+            var state = global_state.nostr_state.nwc_info[ app_pubkey ];
+            var reply = JSON.stringify({
+                result_type: command.method,
+                result: state.tx_history[ pmthash ],
+            });
+            var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
+            var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
+            return super_nostr.sendEvent( event, global_state.relays[ 0 ] );
+        }
     } catch ( e ) {
         try {
             var reply = JSON.stringify({
@@ -892,7 +1112,7 @@ var handleFunction = async message => {
     var user_secret = super_nostr.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
     var user_pubkey = nobleSecp256k1.getPublicKey( user_secret, true ).substring( 2 );
     var nwc_string = `nostr+walletconnect://${global_state.pubkey}?relay=${global_state.relays[ 0 ]}&secret=${user_secret}`;
-    var permissions = [ "pay_invoice", "get_balance", "make_invoice", "lookup_invoice", "list_transactions", "get_info" ];
+    var permissions = [ "pay_invoice", "get_balance", "make_invoice", "lookup_invoice", "list_transactions", "get_info", "make_hodl_invoice", "settle_hodl_invoice", "cancel_hodl_invoice" ];
     global_state.nostr_state.nwc_info[ global_state.pubkey ] = {
         permissions,
         nwc_string,

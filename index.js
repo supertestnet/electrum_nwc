@@ -7,6 +7,7 @@ var nostr_relays = [ "ws://127.0.0.1:6969" ];
 
 // DO NOT MODIFY STUFF BELOW THIS LINE
 
+//npm i request ws noble-secp256k1 bech32 bolt11
 var fs = require( 'fs' );
 var request = require('request');
 var WebSocket = require( 'ws' ).WebSocket;

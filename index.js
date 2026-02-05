@@ -1031,7 +1031,8 @@ var handleFunction = async message => {
                 paid: false,
                 hodl_status: "NO_PAYMENT_DETECTED",
             }
-            checkInvoiceTilPaidOrError( invoice, app_pubkey );
+            var is_incoming = true;
+            checkInvoiceTilPaidOrError( invoice, app_pubkey, is_incoming );
             var emsg = await super_nostr.alt_encrypt( state[ "app_privkey" ], event.pubkey, reply );
             var event = await super_nostr.prepEvent( state[ "app_privkey" ], emsg, 23195, [ [ "p", event.pubkey ], [ "e", event.id ] ] );
             return super_nostr.sendEvent( event, global_state.relays[ 0 ] );

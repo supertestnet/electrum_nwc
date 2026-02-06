@@ -97,6 +97,8 @@ var settleHodlInvoice = async ( preimage, app_pubkey ) => {
     var params = {preimage};
     queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
     global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ].hodl_status = "SETTLED";
+    global_state.nostr_state.nwc_info[ app_pubkey ].balance = global_state.nostr_state.nwc_info[ app_pubkey ].balance + global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "amount" ];
+    global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
     return true;
 }
 
@@ -125,22 +127,14 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
     }
     var pmthash = getInvoicePmthash( invoice_obj[ "lightning_invoice" ] );
     var settled_status = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ];
-    if ( is_incoming ) {
-        var invoice_data = await lookupInvoice( pmthash );
-    } else {
-        var invoice_data = await lookupOutgoingInvoice( pmthash );
-        console.log( invoice_data );
-    }
+    if ( is_incoming ) var invoice_data = await lookupInvoice( pmthash );
+    else var invoice_data = await lookupOutgoingInvoice( pmthash );
     if ( is_incoming ) {
         var is_paid = invoice_data.status === 'paid' && invoice_data.received_amount_sat >= invoice_data.invoice_amount_sat;
         if ( is_paid ) {
             global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
             var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
-            if ( preimage ) {
-                var method = 'settle_hold_invoice';
-                var params = {preimage};
-                queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-            }
+            if ( preimage ) settleHodlInvoice( preimage, app_pubkey );
         }
     } else {
         var is_paid = invoice_data.status_str === 'Paid' || invoice_data.status === 3;
@@ -148,16 +142,11 @@ var checkLNInvoice = async ( invoice_obj, app_pubkey, is_incoming ) => {
     if ( is_paid ) {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "paid" ] = true;
         var preimage = global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
-        if ( preimage ) {
-            var method = 'settle_hold_invoice';
-            var params = {preimage};
-            queryElectrum( electrum_username, electrum_password, electrum_endpoint, method, params );
-        }
+        if ( preimage ) settleHodlInvoice( preimage, app_pubkey );
     }
-    var status_changed = is_paid && !settled_status && global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "preimage" ];
-    if ( status_changed ) {
+    var status_changed = is_paid && !settled_status;
+    if ( status_changed && !is_incoming ) {
         global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "settled_at" ] = Math.floor( Date.now() / 1000 );
-        global_state.nostr_state.nwc_info[ app_pubkey ].balance = global_state.nostr_state.nwc_info[ app_pubkey ].balance + global_state.nostr_state.nwc_info[ app_pubkey ].tx_history[ pmthash ][ "amount" ];
     }
     if ( is_incoming ) {
         var is_settled = invoice_data.status === 'settled';
